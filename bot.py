@@ -30,6 +30,9 @@ SECCIONES = {
     ],
 }
 
+# La edición de España a veces cuela noticias locales de allá en "Mundo"
+EXCLUIR = {"🌎 Internacional": re.compile(r"\b(España|Madrid|Sánchez|PSOE|Feijóo)\b")}
+
 SIMILITUD_DUPLICADO = 0.5  # títulos que comparten este % de palabras = misma noticia
 ARCHIVO_VISTOS = Path(__file__).parent / "vistos.json"
 LIMITE_VISTOS = 2000  # cuántos enlaces recordar para no repetir
@@ -95,6 +98,8 @@ def obtener_nuevas(vistos):
                 vistos_set.add(enlace)
                 if cuenta >= maximo or es_repetida(titulo, elegidas):
                     continue
+                if seccion in EXCLUIR and EXCLUIR[seccion].search(titulo):
+                    continue
                 if nombre != "Google News":
                     titulo = f"{titulo} - {nombre}"
                 items.append((titulo, enlace))
@@ -120,15 +125,29 @@ def armar_mensajes(nuevas):
     return mensajes
 
 
+def acortar(enlace):
+    """Acorta enlaces largos con TinyURL; si falla, deja el original."""
+    if len(enlace) <= 60:
+        return enlace
+    try:
+        r = requests.get(
+            "https://tinyurl.com/api-create.php", params={"url": enlace}, timeout=20
+        )
+        corto = r.text.strip()
+        if r.ok and corto.startswith("https://"):
+            return corto
+    except Exception as e:
+        print(f"No se pudo acortar {enlace[:60]}...: {e}")
+    return enlace
+
+
 def armar_mensajes_whatsapp(nuevas):
     """Arma mensajes en formato WhatsApp (*negrita*), cortos para no fallar."""
     mensajes, actual = [], "📰 *Noticias*\n"
     for seccion, items in nuevas.items():
         bloque = f"\n*{seccion}*\n"
         for titulo, enlace in items:
-            bloque += f"• {titulo}\n"
-            if len(enlace) <= 150:  # los de Google News son enormes; van solo en Telegram
-                bloque += f"{enlace}\n"
+            bloque += f"• {titulo}\n{acortar(enlace)}\n"
         if len(actual) + len(bloque) > 1500:
             mensajes.append(actual)
             actual = ""
