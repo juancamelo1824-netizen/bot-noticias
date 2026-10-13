@@ -1,8 +1,9 @@
-"""Bot de noticias: lee fuentes RSS y envía las novedades a Telegram."""
+"""Bot de noticias: lee fuentes RSS y envía las novedades a Telegram y WhatsApp."""
 
 import html
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -10,17 +11,26 @@ from pathlib import Path
 import feedparser
 import requests
 
-# Fuentes de noticias (nombre -> URL del RSS). Agrega o quita las que quieras.
-FUENTES = {
-    "BBC Mundo": "https://feeds.bbci.co.uk/mundo/rss.xml",
-    "El País": "https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/portada",
-    "DW Español": "https://rss.dw.com/xml/rss-sp-all",
-    "France 24": "https://www.france24.com/es/rss",
-    "Infobae": "https://www.infobae.com/arc/outboundfeeds/rss/",
-    "Europa Press": "https://www.europapress.es/rss/rss.aspx",
+# Secciones -> fuentes. Cada fuente: (nombre, URL del RSS, máximo por envío).
+# Google News ordena por relevancia (cuántos medios cubren la noticia),
+# así que sus primeras noticias son las más importantes del momento.
+# Para Colombia se usa la edición colombiana; para lo internacional, la de
+# España, porque la colombiana mezcla noticias locales en "Mundo".
+GN_CO = "hl=es-419&gl=CO&ceid=CO:es-419"
+GN_MUNDO = "hl=es&gl=ES&ceid=ES:es"
+SECCIONES = {
+    "🇨🇴 Colombia": [
+        ("Google News", f"https://news.google.com/rss/headlines/section/topic/NATION?{GN_CO}", 5),
+        ("El Tiempo", "https://www.eltiempo.com/rss/colombia.xml", 2),
+    ],
+    "🌎 Internacional": [
+        ("Google News", f"https://news.google.com/rss/headlines/section/topic/WORLD?{GN_MUNDO}", 5),
+        ("BBC Mundo", "https://feeds.bbci.co.uk/mundo/rss.xml", 2),
+        ("France 24", "https://www.france24.com/es/am%C3%A9rica-latina/rss", 1),
+    ],
 }
 
-MAX_POR_FUENTE = 3  # noticias nuevas máximas por fuente en cada envío
+SIMILITUD_DUPLICADO = 0.5  # títulos que comparten este % de palabras = misma noticia
 ARCHIVO_VISTOS = Path(__file__).parent / "vistos.json"
 LIMITE_VISTOS = 2000  # cuántos enlaces recordar para no repetir
 
@@ -45,38 +55,61 @@ def guardar_vistos(vistos):
     )
 
 
+def palabras(titulo):
+    """Palabras significativas de un título, para detectar noticias repetidas."""
+    titulo = titulo.rsplit(" - ", 1)[0]  # quita el " - Medio" de Google News
+    return {p for p in re.findall(r"\w+", titulo.lower()) if len(p) > 3}
+
+
+def es_repetida(titulo, elegidas):
+    p = palabras(titulo)
+    for otra in elegidas:
+        q = palabras(otra)
+        if p and q and len(p & q) / min(len(p), len(q)) >= SIMILITUD_DUPLICADO:
+            return True
+    return False
+
+
 def obtener_nuevas(vistos):
-    """Devuelve {fuente: [(titulo, enlace), ...]} con lo que no se ha enviado."""
+    """Devuelve {seccion: [(titulo, enlace), ...]} con lo que no se ha enviado."""
     vistos_set = set(vistos)
     nuevas = {}
-    for nombre, url in FUENTES.items():
-        try:
-            feed = feedparser.parse(url, agent="Mozilla/5.0 (bot-noticias)")
-        except Exception as e:
-            print(f"Error leyendo {nombre}: {e}")
-            continue
-        if not feed.entries:
-            print(f"Sin noticias en {nombre} (¿URL caída?)")
+    elegidas = []  # títulos de esta ronda, para no repetir la misma noticia
+    for seccion, fuentes in SECCIONES.items():
         items = []
-        for entrada in feed.entries:
-            enlace = entrada.get("link")
-            titulo = entrada.get("title", "").strip()
-            if not enlace or not titulo or enlace in vistos_set:
+        for nombre, url, maximo in fuentes:
+            try:
+                feed = feedparser.parse(url, agent="Mozilla/5.0 (bot-noticias)")
+            except Exception as e:
+                print(f"Error leyendo {nombre}: {e}")
                 continue
-            vistos.append(enlace)
-            vistos_set.add(enlace)
-            if len(items) < MAX_POR_FUENTE:
+            if not feed.entries:
+                print(f"Sin noticias en {nombre} (¿URL caída?)")
+            cuenta = 0
+            for entrada in feed.entries:
+                enlace = entrada.get("link")
+                titulo = entrada.get("title", "").strip()
+                if not enlace or not titulo or enlace in vistos_set:
+                    continue
+                vistos.append(enlace)
+                vistos_set.add(enlace)
+                if cuenta >= maximo or es_repetida(titulo, elegidas):
+                    continue
+                if nombre != "Google News":
+                    titulo = f"{titulo} - {nombre}"
                 items.append((titulo, enlace))
+                elegidas.append(titulo)
+                cuenta += 1
         if items:
-            nuevas[nombre] = items
+            nuevas[seccion] = items
     return nuevas
 
 
 def armar_mensajes(nuevas):
     """Arma mensajes HTML para Telegram, respetando el límite de 4096 caracteres."""
     mensajes, actual = [], "📰 <b>Noticias</b>\n"
-    for fuente, items in nuevas.items():
-        bloque = f"\n<b>{html.escape(fuente)}</b>\n"
+    for seccion, items in nuevas.items():
+        bloque = f"\n<b>{html.escape(seccion)}</b>\n"
         for titulo, enlace in items:
             bloque += f'• <a href="{html.escape(enlace)}">{html.escape(titulo)}</a>\n'
         if len(actual) + len(bloque) > 4000:
@@ -90,10 +123,12 @@ def armar_mensajes(nuevas):
 def armar_mensajes_whatsapp(nuevas):
     """Arma mensajes en formato WhatsApp (*negrita*), cortos para no fallar."""
     mensajes, actual = [], "📰 *Noticias*\n"
-    for fuente, items in nuevas.items():
-        bloque = f"\n*{fuente}*\n"
+    for seccion, items in nuevas.items():
+        bloque = f"\n*{seccion}*\n"
         for titulo, enlace in items:
-            bloque += f"• {titulo}\n{enlace}\n"
+            bloque += f"• {titulo}\n"
+            if len(enlace) <= 150:  # los de Google News son enormes; van solo en Telegram
+                bloque += f"{enlace}\n"
         if len(actual) + len(bloque) > 1500:
             mensajes.append(actual)
             actual = ""
@@ -152,7 +187,7 @@ def main():
                         time.sleep(5)
             except Exception as e:
                 print(f"Error enviando a WhatsApp: {e}")
-        print(f"Enviadas noticias de {len(nuevas)} fuentes.")
+        print(f"Enviadas noticias de {len(nuevas)} secciones.")
 
     if not PRUEBA:
         guardar_vistos(vistos)
