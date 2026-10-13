@@ -26,6 +26,9 @@ LIMITE_VISTOS = 2000  # cuántos enlaces recordar para no repetir
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+# WhatsApp vía CallMeBot (opcional: si faltan, solo se envía a Telegram)
+WA_PHONE = os.environ.get("WHATSAPP_PHONE")
+WA_APIKEY = os.environ.get("WHATSAPP_APIKEY")
 PRUEBA = "--prueba" in sys.argv  # imprime en pantalla en vez de enviar
 
 
@@ -84,6 +87,30 @@ def armar_mensajes(nuevas):
     return mensajes
 
 
+def armar_mensajes_whatsapp(nuevas):
+    """Arma mensajes en formato WhatsApp (*negrita*), cortos para no fallar."""
+    mensajes, actual = [], "📰 *Noticias*\n"
+    for fuente, items in nuevas.items():
+        bloque = f"\n*{fuente}*\n"
+        for titulo, enlace in items:
+            bloque += f"• {titulo}\n{enlace}\n"
+        if len(actual) + len(bloque) > 1500:
+            mensajes.append(actual)
+            actual = ""
+        actual += bloque
+    mensajes.append(actual)
+    return mensajes
+
+
+def enviar_whatsapp(texto):
+    r = requests.get(
+        "https://api.callmebot.com/whatsapp.php",
+        params={"phone": WA_PHONE, "text": texto, "apikey": WA_APIKEY},
+        timeout=60,
+    )
+    r.raise_for_status()
+
+
 def enviar(texto):
     r = requests.post(
         f"https://api.telegram.org/bot{TOKEN}/sendMessage",
@@ -114,6 +141,17 @@ def main():
             else:
                 enviar(mensaje)
                 time.sleep(1)
+        if WA_PHONE and WA_APIKEY:
+            # Si WhatsApp falla, no se pierde el envío de Telegram
+            try:
+                for mensaje in armar_mensajes_whatsapp(nuevas):
+                    if PRUEBA:
+                        print(mensaje)
+                    else:
+                        enviar_whatsapp(mensaje)
+                        time.sleep(5)
+            except Exception as e:
+                print(f"Error enviando a WhatsApp: {e}")
         print(f"Enviadas noticias de {len(nuevas)} fuentes.")
 
     if not PRUEBA:
