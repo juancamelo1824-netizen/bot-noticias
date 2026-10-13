@@ -1,4 +1,4 @@
-﻿name: Bot de noticias
+name: Bot de noticias
 
 on:
   schedule:
@@ -26,7 +26,7 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-      # Guarda quÃ© noticias ya se enviaron para no repetirlas
+      # Guarda qué noticias ya se enviaron para no repetirlas
       - name: Guardar vistos
         run: |
           git config user.name "bot-noticias"
